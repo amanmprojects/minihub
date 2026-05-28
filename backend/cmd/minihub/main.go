@@ -13,7 +13,7 @@ func main() {
 	addr := env("MINIHUB_ADDR", ":8080")
 	dataDir := env("MINIHUB_DATA", filepath.Join("data"))
 	dbPath := env("MINIHUB_DB", filepath.Join(dataDir, "minihub.db"))
-	frontendDir := env("MINIHUB_FRONTEND", filepath.Join("..", "frontend"))
+	frontendDir := env("MINIHUB_FRONTEND", filepath.Join("..", "frontend", "dist"))
 
 	server, err := app.NewServer(app.Config{
 		DataDir:     dataDir,

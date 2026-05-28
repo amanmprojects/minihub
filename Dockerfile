@@ -1,3 +1,10 @@
+FROM node:24-alpine AS frontend-build
+WORKDIR /src/frontend
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm install
+COPY frontend ./
+RUN npm run build
+
 FROM golang:1.26 AS build
 WORKDIR /src
 COPY backend/go.mod backend/go.mod
@@ -10,7 +17,7 @@ RUN apk add --no-cache git ca-certificates
 WORKDIR /app
 COPY --from=build /out/minihub /usr/local/bin/minihub
 COPY --from=build /out/minihub-ssh /usr/local/bin/minihub-ssh
-COPY frontend /app/frontend
+COPY --from=frontend-build /src/frontend/dist /app/frontend
 ENV MINIHUB_ADDR=:8080
 ENV MINIHUB_DATA=/data
 ENV MINIHUB_FRONTEND=/app/frontend

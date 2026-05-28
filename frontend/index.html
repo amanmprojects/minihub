@@ -1,50 +1,12 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Minihub</title>
-    <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <header class="topbar">
-      <div>
-        <h1>Minihub</h1>
-        <p>Self-hosted Git repositories with HTTP clone and push.</p>
-      </div>
-      <form id="create-repo" class="create-form">
-        <input id="repo-name" name="name" placeholder="team/project" autocomplete="off" required />
-        <input id="repo-description" name="description" placeholder="Description" autocomplete="off" />
-        <button type="submit">Create</button>
-      </form>
-      <form id="login-form" class="login-form">
-        <input name="username" placeholder="username" autocomplete="username" />
-        <input name="password" placeholder="password" type="password" autocomplete="current-password" />
-        <button type="submit">Sign in</button>
-      </form>
-    </header>
-
-    <main class="layout">
-      <section class="repo-list">
-        <div class="section-title">
-          <h2>Repositories</h2>
-          <button id="refresh" type="button" aria-label="Refresh repositories">Refresh</button>
-        </div>
-        <div id="repos" class="repos"></div>
-      </section>
-
-      <section class="repo-detail" id="repo-detail">
-        <div class="empty">Create or select a repository.</div>
-      </section>
-    </main>
-
-    <template id="repo-card-template">
-      <button class="repo-card" type="button">
-        <strong></strong>
-        <span></span>
-      </button>
-    </template>
-
-    <script src="/app.js" type="module"></script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

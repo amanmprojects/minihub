@@ -1,0 +1,134 @@
+@import "tailwindcss";
+@plugin "tailwindcss-animate";
+
+@theme {
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  --color-background: #ffffff;
+  --color-foreground: #1f2328;
+  --color-card: #ffffff;
+  --color-muted: #f6f8fa;
+  --color-subtle: #f6f8fa;
+  --color-muted-foreground: #656d76;
+  --color-border: #d0d7de;
+  --color-primary: #1f883d;
+  --color-primary-foreground: #ffffff;
+  --color-header: #24292f;
+  --color-header-foreground: #ffffff;
+  --color-header-muted: #8c959f;
+  --color-link: #0969da;
+  --color-directory: #54aeff;
+}
+
+.dark {
+  --color-background: #0d1117;
+  --color-foreground: #e6edf3;
+  --color-card: #0d1117;
+  --color-muted: #161b22;
+  --color-subtle: #161b22;
+  --color-muted-foreground: #8b949e;
+  --color-border: #30363d;
+  --color-primary: #238636;
+  --color-primary-foreground: #ffffff;
+  --color-header: #010409;
+  --color-header-foreground: #e6edf3;
+  --color-header-muted: #8b949e;
+  --color-link: #58a6ff;
+  --color-directory: #58a6ff;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; font-family: var(--font-sans); background: var(--color-background); }
+button, input, select { font: inherit; }
+button { cursor: pointer; }
+
+@utility input {
+  @apply min-w-0 rounded-md border border-border bg-card px-3 py-[6px] text-sm text-foreground outline-none transition focus:border-link focus:ring-2 focus:ring-link/20;
+}
+
+@utility header-input {
+  @apply min-w-0 rounded-md border border-white/15 bg-white/10 px-3 py-[6px] text-sm text-header-foreground placeholder:text-header-muted outline-none transition focus:border-white/40 focus:bg-white/15;
+}
+
+@utility btn-primary {
+  @apply inline-flex items-center justify-center gap-2 rounded-md border border-primary bg-primary px-3 py-[6px] text-sm font-semibold text-primary-foreground shadow-sm transition hover:brightness-95 active:scale-[.99];
+}
+
+@utility btn-secondary {
+  @apply inline-flex items-center justify-center gap-2 rounded-md border border-border bg-muted px-3 py-[6px] text-sm font-semibold transition hover:bg-border/30 active:scale-[.99];
+}
+
+@utility header-button {
+  @apply inline-flex items-center justify-center rounded-md border border-white/15 bg-white/10 px-3 py-[6px] text-sm font-semibold text-header-foreground transition hover:bg-white/15;
+}
+
+@utility icon-btn {
+  @apply inline-grid size-8 place-items-center rounded-md border border-border bg-card transition hover:bg-muted;
+}
+
+@utility header-icon {
+  @apply inline-grid size-9 place-items-center rounded-md text-header-foreground transition hover:bg-white/10;
+}
+
+@utility panel {
+  @apply overflow-hidden rounded-md border border-border bg-card;
+}
+
+@utility row {
+  @apply flex min-h-11 items-center gap-3 px-4 py-2 text-sm transition hover:bg-muted;
+}
+
+@utility badge {
+  @apply rounded-full border border-border px-2 py-0.5 text-xs font-medium text-muted-foreground;
+}
+
+@utility label {
+  @apply text-sm font-medium text-foreground;
+}
+
+.repo-header {
+  @apply rounded-md border border-border bg-muted p-4;
+}
+
+.repo-card {
+  @apply grid w-full gap-1 rounded-md border border-transparent p-2 text-left transition hover:bg-muted;
+}
+
+.repo-card-active {
+  @apply border-border bg-muted;
+}
+
+.clone-box {
+  @apply overflow-auto rounded-md border border-border bg-muted px-3 py-2 font-mono text-sm text-muted-foreground;
+}
+
+.tabs {
+  @apply flex gap-1 overflow-x-auto;
+}
+
+.tab {
+  @apply inline-flex shrink-0 items-center gap-2 border-b-2 border-transparent px-3 py-2 text-sm font-medium text-muted-foreground transition hover:text-foreground;
+}
+
+.tab-active {
+  @apply border-primary text-foreground;
+}
+
+.form-grid {
+  @apply grid gap-2 md:grid-cols-[repeat(4,minmax(0,1fr))_auto];
+}
+
+.commit-row {
+  @apply grid w-full grid-cols-[72px_1fr] gap-x-3 px-4 py-3 text-left text-sm transition hover:bg-muted;
+}
+
+.code-block {
+  @apply max-h-[70vh] overflow-auto bg-muted p-4 font-mono text-sm leading-relaxed text-foreground;
+}
+
+.toast {
+  @apply fixed bottom-4 right-4 z-50 flex max-w-sm items-center gap-2 rounded-md border px-4 py-3 text-sm font-medium shadow-xl;
+}
+
+.toast-success { @apply border-green-700 bg-primary text-white; }
+.toast-error { @apply border-red-700 bg-red-600 text-white; }
+.line-clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }

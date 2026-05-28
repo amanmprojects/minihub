@@ -1,13 +1,21 @@
 Minihub
 =======
 
-Minihub is a small self-hosted Git service with a Go backend and a static web frontend. It stores bare repositories on disk and exposes Git smart HTTP through `git http-backend`, so the standard `git` CLI can clone, fetch, and push.
+Minihub is a small self-hosted Git service with a Go backend and a React web frontend. It stores bare repositories on disk and exposes Git smart HTTP through `git http-backend`, so the standard `git` CLI can clone, fetch, and push.
 
 Run locally:
 
 ```sh
 cd backend
 go run ./cmd/minihub
+```
+
+Run the frontend dev server in another shell:
+
+```sh
+cd frontend
+npm install
+npm run dev
 ```
 
 Open `http://localhost:8080`, create a repository, then use the clone URL shown in the UI:
@@ -22,7 +30,7 @@ Configuration:
 MINIHUB_ADDR=:8080              # HTTP listen address
 MINIHUB_DATA=./data             # bare repository storage
 MINIHUB_DB=./data/minihub.db    # SQLite development database
-MINIHUB_FRONTEND=../frontend    # static frontend directory
+MINIHUB_FRONTEND=../frontend/dist # built frontend directory
 MINIHUB_TLS_CERT=cert.pem       # optional HTTPS certificate
 MINIHUB_TLS_KEY=key.pem         # optional HTTPS private key
 MINIHUB_SSH_ADDR=:2222          # SSH listen address for minihub-ssh
