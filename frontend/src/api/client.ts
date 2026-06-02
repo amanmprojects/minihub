@@ -12,7 +12,8 @@ export function getToken() {
 }
 
 export function setToken(token: string) {
-  localStorage.setItem("minihubToken", token);
+  if (token) localStorage.setItem("minihubToken", token);
+  else localStorage.removeItem("minihubToken");
 }
 
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {

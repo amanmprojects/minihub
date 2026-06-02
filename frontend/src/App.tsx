@@ -28,6 +28,7 @@ export function App() {
   const [notice, setNotice] = useState<Notice>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [pathname, setPathname] = useState(window.location.pathname);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
 
   const route = useMemo(() => parseRoute(pathname, repos), [pathname, repos]);
 
@@ -56,6 +57,7 @@ export function App() {
   }
 
   useEffect(() => {
+    api<{ user: User }>("/api/session").then((session) => setCurrentUser(session.user)).catch(() => setToken(""));
     loadRepos();
   }, []);
 
@@ -91,11 +93,38 @@ export function App() {
     try {
       const session = await api<Session>("/api/login", { method: "POST", body: JSON.stringify(data) });
       setToken(session.token);
+      setCurrentUser(session.user);
       form.reset();
+      await loadRepos();
       flash("Signed in");
     } catch (error) {
       flash(errorMessage(error), "error");
     }
+  }
+
+  async function signup(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const data = Object.fromEntries(new FormData(form));
+    try {
+      await api<User>("/api/users", { method: "POST", body: JSON.stringify(data) });
+      const session = await api<Session>("/api/login", { method: "POST", body: JSON.stringify({ email: data.email, password: data.password }) });
+      setToken(session.token);
+      setCurrentUser(session.user);
+      form.reset();
+      await loadRepos();
+      flash("Account created");
+    } catch (error) {
+      flash(errorMessage(error), "error");
+    }
+  }
+
+  function logout() {
+    setToken("");
+    setCurrentUser(null);
+    setRepos([]);
+    loadRepos();
+    flash("Signed out");
   }
 
   return (
@@ -110,18 +139,18 @@ export function App() {
               <p className="text-xs text-header-muted">Self-hosted Git repositories</p>
             </div>
           </button>
-          <form onSubmit={login} className="ml-auto hidden items-center gap-2 md:flex">
-            <input className="header-input w-32" name="username" placeholder="Username" autoComplete="username" />
+          {currentUser ? <div className="ml-auto hidden items-center gap-2 text-sm md:flex"><span className="text-header-muted">Signed in as {currentUser.username}</span><button className="header-button" onClick={logout}>Sign out</button></div> : <form onSubmit={login} className="ml-auto hidden items-center gap-2 md:flex">
+            <input className="header-input w-40" name="email" placeholder="Email" type="email" autoComplete="email" />
             <input className="header-input w-32" name="password" placeholder="Password" type="password" autoComplete="current-password" />
             <button className="header-button" type="submit">Sign in</button>
-          </form>
+          </form>}
           <button className="header-icon" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} aria-label="Toggle theme">{theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}</button>
         </div>
       </header>
 
       <div className="mx-auto grid max-w-screen-2xl gap-6 px-4 py-6 sm:px-6 lg:grid-cols-[296px_1fr]">
-        <Sidebar repos={repos} selected={route.repo} loading={loadingRepos} createRepo={createRepo} refresh={() => loadRepos()} select={(repo) => navigate(repoUrl(repo.name))} />
-        {mobileOpen && <div className="fixed inset-0 z-40 bg-black/60 lg:hidden" onClick={() => setMobileOpen(false)}><aside className="h-full w-[88vw] max-w-sm bg-card" onClick={(event) => event.stopPropagation()}><Sidebar repos={repos} selected={route.repo} loading={loadingRepos} createRepo={createRepo} refresh={() => loadRepos()} select={(repo) => navigate(repoUrl(repo.name))} mobile /></aside></div>}
+        <Sidebar repos={repos} selected={route.repo} loading={loadingRepos} createRepo={createRepo} signup={signup} currentUser={currentUser} refresh={() => loadRepos()} select={(repo) => navigate(repoUrl(repo.name))} />
+        {mobileOpen && <div className="fixed inset-0 z-40 bg-black/60 lg:hidden" onClick={() => setMobileOpen(false)}><aside className="h-full w-[88vw] max-w-sm bg-card" onClick={(event) => event.stopPropagation()}><Sidebar repos={repos} selected={route.repo} loading={loadingRepos} createRepo={createRepo} signup={signup} currentUser={currentUser} refresh={() => loadRepos()} select={(repo) => navigate(repoUrl(repo.name))} mobile /></aside></div>}
         <main className="min-w-0">
           {route.repo ? <RepoDetail repo={route.repo} route={route} navigate={navigate} flash={flash} refreshRepos={() => loadRepos(route.repo?.name)} /> : route.notFound && !loadingRepos ? <NotFound repoName={route.repoName} /> : <EmptyState />}
         </main>
@@ -131,7 +160,7 @@ export function App() {
   );
 }
 
-function Sidebar({ repos, selected, loading, createRepo, refresh, select, mobile = false }: { repos: Repository[]; selected: Repository | null; loading: boolean; createRepo: (event: FormEvent<HTMLFormElement>) => void; refresh: () => void; select: (repo: Repository) => void; mobile?: boolean }) {
+function Sidebar({ repos, selected, loading, createRepo, signup, currentUser, refresh, select, mobile = false }: { repos: Repository[]; selected: Repository | null; loading: boolean; createRepo: (event: FormEvent<HTMLFormElement>) => void; signup: (event: FormEvent<HTMLFormElement>) => void; currentUser: User | null; refresh: () => void; select: (repo: Repository) => void; mobile?: boolean }) {
   return (
     <aside className={`${mobile ? "" : "hidden lg:block"} min-h-[calc(100vh-7rem)] rounded-md border border-border bg-card`}>
       <div className="border-b border-border p-4">
@@ -139,11 +168,19 @@ function Sidebar({ repos, selected, loading, createRepo, refresh, select, mobile
           <h2 className="text-sm font-semibold">Repositories</h2>
           <button className="icon-btn" onClick={refresh} aria-label="Refresh repositories"><RefreshCw size={16} /></button>
         </div>
-        <form onSubmit={createRepo} className="grid gap-2">
-          <input className="input" name="name" placeholder="team/project" required autoComplete="off" />
+        {currentUser ? <form onSubmit={createRepo} className="grid gap-2">
+          <input className="input" name="name" placeholder="repository-name" required autoComplete="off" />
           <input className="input" name="description" placeholder="Description" autoComplete="off" />
+          <select className="input" name="visibility" defaultValue="private"><option value="private">Private</option><option value="public">Public</option></select>
           <button className="btn-primary" type="submit"><Plus size={16} />New repository</button>
-        </form>
+        </form> : <form onSubmit={signup} className="grid gap-2">
+          <p className="text-sm text-muted-foreground">Create an account to add repositories.</p>
+          <input className="input" name="username" placeholder="username" required autoComplete="username" />
+          <input className="input" name="displayName" placeholder="Display name" autoComplete="name" />
+          <input className="input" name="email" placeholder="Email" type="email" required autoComplete="email" />
+          <input className="input" name="password" placeholder="Password" type="password" required autoComplete="new-password" />
+          <button className="btn-primary" type="submit">Sign up</button>
+        </form>}
       </div>
       <div className="p-2">
         {loading && <SkeletonRows />}
@@ -227,7 +264,7 @@ function RepoDetail({ repo, route, navigate, flash, refreshRepos }: { repo: Repo
             <div className="flex min-w-0 items-center gap-2 text-xl">
               <GitBranch className="shrink-0 text-muted-foreground" size={20} />
               <h2 className="break-words font-semibold text-link">{repo.name}</h2>
-              <span className="badge">Private</span>
+              <span className="badge">{repo.visibility === "public" ? "Public" : "Private"}</span>
             </div>
             <p className="mt-2 max-w-3xl text-sm text-muted-foreground">{repo.description || "No description provided."}</p>
           </div>
@@ -371,10 +408,10 @@ function PeopleTab({ flash }: { flash: (message: string, kind?: "success" | "err
 function SettingsTab({ repo, flash, refreshRepos, loadBranches }: { repo: Repository; flash: (message: string, kind?: "success" | "error") => void; refreshRepos: () => void; loadBranches: () => Promise<void>; }) {
   const [permissions, setPermissions] = useState<Permission[]>([]);
   async function loadPermissions() { setPermissions(await api<Permission[]>(`/api/repos/${encodeURIComponent(repo.name)}/permissions`)); }
-  async function saveSettings(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = event.currentTarget; const formData = new FormData(form); try { await api(`/api/repos/${encodeURIComponent(repo.name)}/settings`, { method: "PATCH", body: JSON.stringify({ description: formData.get("description") || "", protectedBranches: String(formData.get("protectedBranches") || "").split(",").map((x) => x.trim()).filter(Boolean) }) }); await refreshRepos(); await loadBranches(); flash("Settings saved"); } catch (error) { flash(errorMessage(error), "error"); } }
+  async function saveSettings(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = event.currentTarget; const formData = new FormData(form); try { await api(`/api/repos/${encodeURIComponent(repo.name)}/settings`, { method: "PATCH", body: JSON.stringify({ description: formData.get("description") || "", protectedBranches: String(formData.get("protectedBranches") || "").split(",").map((x) => x.trim()).filter(Boolean), visibility: formData.get("visibility") || repo.visibility }) }); await refreshRepos(); await loadBranches(); flash("Settings saved"); } catch (error) { flash(errorMessage(error), "error"); } }
   async function grant(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = event.currentTarget; const data = Object.fromEntries(new FormData(form)); try { await api(`/api/repos/${encodeURIComponent(repo.name)}/permissions`, { method: "PUT", body: JSON.stringify({ ...data, userId: Number(data.userId) }) }); form.reset(); await loadPermissions(); flash("Permission granted"); } catch (error) { flash(errorMessage(error), "error"); } }
   useEffect(() => { loadPermissions().catch((error) => flash(errorMessage(error), "error")); }, [repo.name]);
-  return <div className="grid gap-5 xl:grid-cols-[1fr_380px]"><section className="panel"><PanelTitle title="Repository settings" /><form onSubmit={saveSettings} className="grid gap-4 p-4"><label className="label">Description<input className="input mt-1" name="description" defaultValue={repo.description} /></label><label className="label">Protected branches<input className="input mt-1" name="protectedBranches" defaultValue={(repo.protectedBranches || []).join(", ")} /></label><button className="btn-primary w-fit">Save settings</button></form></section><section className="panel"><PanelTitle title="Permissions" /><form onSubmit={grant} className="grid gap-2 border-b border-border p-4"><input className="input" name="userId" placeholder="user id" required /><select className="input" name="role"><option>read</option><option>triage</option><option>write</option><option>maintain</option><option>admin</option></select><button className="btn-primary">Grant</button></form><div className="divide-y divide-border">{permissions.map((p) => <div key={`${p.userId}-${p.role}`} className="row"><Shield size={16} /><span>{p.username}</span><span className="ml-auto text-muted-foreground">{p.role}</span></div>)}</div></section></div>;
+  return <div className="grid gap-5 xl:grid-cols-[1fr_380px]"><section className="panel"><PanelTitle title="Repository settings" /><form onSubmit={saveSettings} className="grid gap-4 p-4"><label className="label">Description<input className="input mt-1" name="description" defaultValue={repo.description} /></label><label className="label">Visibility<select className="input mt-1" name="visibility" defaultValue={repo.visibility}><option value="private">Private</option><option value="public">Public</option></select></label><label className="label">Protected branches<input className="input mt-1" name="protectedBranches" defaultValue={(repo.protectedBranches || []).join(", ")} /></label><button className="btn-primary w-fit">Save settings</button></form></section><section className="panel"><PanelTitle title="Permissions" /><form onSubmit={grant} className="grid gap-2 border-b border-border p-4"><input className="input" name="userId" placeholder="user id" required /><select className="input" name="role"><option>read</option><option>triage</option><option>write</option><option>maintain</option><option>admin</option></select><button className="btn-primary">Grant</button></form><div className="divide-y divide-border">{permissions.map((p) => <div key={`${p.userId}-${p.role}`} className="row"><Shield size={16} /><span>{p.username}</span><span className="ml-auto text-muted-foreground">{p.role}</span></div>)}</div></section></div>;
 }
 
 function GenericResource<T>({ repo, path, title, form, render, flash }: { repo: Repository; path: string; title: string; form: ReactNode; render: (item: T) => { title: string; subtitle: string }; flash: (message: string, kind?: "success" | "error") => void }) {

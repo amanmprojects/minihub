@@ -1,6 +1,8 @@
 export type Repository = {
   name: string;
+  owner: string;
   description: string;
+  visibility: "private" | "public";
   defaultBranch: string;
   protectedBranches: string[];
   cloneUrl: string;
@@ -37,6 +39,8 @@ export type CommitDetail = Commit & {
 
 export type Session = {
   token: string;
+  user: User;
+  expiresAt?: string;
 };
 
 export type PullRequest = {

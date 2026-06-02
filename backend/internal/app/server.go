@@ -3,6 +3,7 @@ package app
 import (
 	"bufio"
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,7 +17,6 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -37,13 +37,15 @@ type Server struct {
 }
 
 type Repository struct {
-	Name              string    `json:"name"`
-	Description       string    `json:"description"`
-	DefaultBranch     string    `json:"defaultBranch"`
-	ProtectedBranches []string  `json:"protectedBranches"`
-	CloneURL          string    `json:"cloneUrl"`
-	CreatedAt         time.Time `json:"createdAt"`
-	UpdatedAt         time.Time `json:"updatedAt"`
+	Name              string   `json:"name"`
+	Owner             string   `json:"owner"`
+	Description       string   `json:"description"`
+	Visibility        string   `json:"visibility"`
+	DefaultBranch     string   `json:"defaultBranch"`
+	ProtectedBranches []string `json:"protectedBranches"`
+	CloneURL          string   `json:"cloneUrl"`
+	CreatedAt         string   `json:"createdAt"`
+	UpdatedAt         string   `json:"updatedAt"`
 }
 
 type repoMeta struct {
@@ -53,6 +55,7 @@ type repoMeta struct {
 }
 
 var repoNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$`)
+var usernamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 func NewServer(cfg Config) (*Server, error) {
 	if cfg.DataDir == "" {
@@ -89,6 +92,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/health", s.health)
 	s.mux.HandleFunc("GET /api/users", s.listUsers)
 	s.mux.HandleFunc("POST /api/users", s.createUser)
+	s.mux.HandleFunc("GET /api/session", s.session)
 	s.mux.HandleFunc("POST /api/login", s.login)
 	s.mux.HandleFunc("GET /api/orgs", s.listOrgs)
 	s.mux.HandleFunc("POST /api/orgs", s.createOrg)
@@ -111,8 +115,48 @@ func (s *Server) currentUser(r *http.Request) (User, bool) {
 			return user, true
 		}
 	}
-	user, err := s.store.User(1)
-	return user, err == nil
+	if username, password, ok := r.BasicAuth(); ok {
+		return s.store.CheckPassword(username, password)
+	}
+	return User{}, false
+}
+
+func (s *Server) currentUserPtr(r *http.Request) *User {
+	user, ok := s.currentUser(r)
+	if !ok {
+		return nil
+	}
+	return &user
+}
+
+func (s *Server) requireRepoRead(w http.ResponseWriter, r *http.Request, repoName string) (User, bool) {
+	record, err := s.store.RepoRecord(repoName)
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, errors.New("repository not found"))
+		return User{}, false
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return User{}, false
+	}
+	user, ok := s.currentUser(r)
+	if record.Visibility == "public" {
+		return user, true
+	}
+	if !ok {
+		writeError(w, http.StatusUnauthorized, errors.New("authentication required"))
+		return User{}, false
+	}
+	role, err := s.store.UserRepoRole(repoName, user.ID)
+	if err != nil {
+		writeError(w, http.StatusForbidden, errors.New("repository permission required"))
+		return User{}, false
+	}
+	if !roleAllows(role, "read") {
+		writeError(w, http.StatusForbidden, errors.New("insufficient repository permission"))
+		return User{}, false
+	}
+	return user, true
 }
 
 func (s *Server) requireRepoRole(w http.ResponseWriter, r *http.Request, repoName string, minRole string) (User, bool) {
@@ -122,7 +166,7 @@ func (s *Server) requireRepoRole(w http.ResponseWriter, r *http.Request, repoNam
 		return User{}, false
 	}
 	role, err := s.store.UserRepoRole(repoName, user.ID)
-	if err != nil && user.ID != 1 {
+	if err != nil {
 		writeError(w, http.StatusForbidden, errors.New("repository permission required"))
 		return User{}, false
 	}
@@ -165,16 +209,25 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, user)
 }
 
+func (s *Server) session(w http.ResponseWriter, r *http.Request) {
+	user, ok := s.currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, errors.New("authentication required"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"user": user})
+}
+
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Username string `json:"username"`
+		Email    string `json:"email"`
 		Password string `json:"password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		writeError(w, http.StatusBadRequest, errors.New("invalid JSON body"))
 		return
 	}
-	session, err := s.store.Login(input.Username, input.Password)
+	session, err := s.store.Login(input.Email, input.Password)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, err)
 		return
@@ -221,17 +274,25 @@ func (s *Server) createRepo(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Name        string `json:"name"`
 		Description string `json:"description"`
+		Visibility  string `json:"visibility"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		writeError(w, http.StatusBadRequest, errors.New("invalid JSON body"))
 		return
 	}
 
-	name, err := normalizeRepoName(input.Name)
+	user, ok := s.currentUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, errors.New("authentication required"))
+		return
+	}
+
+	shortName, err := normalizeRepoShortName(input.Name)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	name := user.Username + "/" + shortName
 
 	repoPath := s.repoPath(name)
 	if _, err := os.Stat(repoPath); err == nil {
@@ -268,12 +329,13 @@ func (s *Server) createRepo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if err := s.store.EnsureRepo(name, meta.Description); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+	record, err := s.store.CreateRepo(user, shortName, meta.Description, input.Visibility)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 
-	repo, err := s.repository(r, name)
+	repo, err := s.repositoryFromRecord(r, record)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -350,6 +412,9 @@ func (s *Server) getRepo(w http.ResponseWriter, r *http.Request, rawName string)
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if _, ok := s.requireRepoRead(w, r, name); !ok {
+		return
+	}
 	repo, err := s.repository(r, name)
 	if errors.Is(err, os.ErrNotExist) {
 		writeError(w, http.StatusNotFound, errors.New("repository not found"))
@@ -362,10 +427,13 @@ func (s *Server) getRepo(w http.ResponseWriter, r *http.Request, rawName string)
 	writeJSON(w, http.StatusOK, repo)
 }
 
-func (s *Server) listPullRequests(w http.ResponseWriter, _ *http.Request, rawName string) {
+func (s *Server) listPullRequests(w http.ResponseWriter, r *http.Request, rawName string) {
 	name, err := normalizeRepoName(rawName)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if _, ok := s.requireRepoRead(w, r, name); !ok {
 		return
 	}
 	items, err := s.store.PullRequests(name)
@@ -414,6 +482,15 @@ func (s *Server) createPullRequest(w http.ResponseWriter, r *http.Request, rawNa
 }
 
 func (s *Server) pullRequestAPI(w http.ResponseWriter, r *http.Request, repoName, tail string) {
+	name, err := normalizeRepoName(repoName)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if _, ok := s.requireRepoRead(w, r, name); !ok {
+		return
+	}
+	repoName = name
 	numberPart, action, _ := strings.Cut(tail, "/")
 	number, err := strconv.ParseInt(numberPart, 10, 64)
 	if err != nil {
@@ -429,6 +506,9 @@ func (s *Server) pullRequestAPI(w http.ResponseWriter, r *http.Request, repoName
 		}
 		writeJSON(w, http.StatusOK, pr)
 	case r.Method == http.MethodPatch && action == "":
+		if _, ok := s.requireRepoRole(w, r, repoName, "triage"); !ok {
+			return
+		}
 		var input struct {
 			Status string `json:"status"`
 		}
@@ -561,10 +641,13 @@ func (s *Server) mergePullRequest(w http.ResponseWriter, _ *http.Request, repoNa
 	writeJSON(w, http.StatusOK, updated)
 }
 
-func (s *Server) listIssues(w http.ResponseWriter, _ *http.Request, rawName string) {
+func (s *Server) listIssues(w http.ResponseWriter, r *http.Request, rawName string) {
 	name, err := normalizeRepoName(rawName)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if _, ok := s.requireRepoRead(w, r, name); !ok {
 		return
 	}
 	items, err := s.store.Issues(name)
@@ -606,10 +689,13 @@ func (s *Server) createIssue(w http.ResponseWriter, r *http.Request, rawName str
 	writeJSON(w, http.StatusCreated, item)
 }
 
-func (s *Server) listReleases(w http.ResponseWriter, _ *http.Request, rawName string) {
+func (s *Server) listReleases(w http.ResponseWriter, r *http.Request, rawName string) {
 	name, err := normalizeRepoName(rawName)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if _, ok := s.requireRepoRead(w, r, name); !ok {
 		return
 	}
 	items, err := s.store.Releases(name)
@@ -652,10 +738,13 @@ func (s *Server) createRelease(w http.ResponseWriter, r *http.Request, rawName s
 	writeJSON(w, http.StatusCreated, item)
 }
 
-func (s *Server) listWebhooks(w http.ResponseWriter, _ *http.Request, rawName string) {
+func (s *Server) listWebhooks(w http.ResponseWriter, r *http.Request, rawName string) {
 	name, err := normalizeRepoName(rawName)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if _, ok := s.requireRepoRole(w, r, name, "admin"); !ok {
 		return
 	}
 	items, err := s.store.Webhooks(name)
@@ -692,10 +781,13 @@ func (s *Server) createWebhook(w http.ResponseWriter, r *http.Request, rawName s
 	writeJSON(w, http.StatusCreated, item)
 }
 
-func (s *Server) listCIRuns(w http.ResponseWriter, _ *http.Request, rawName string) {
+func (s *Server) listCIRuns(w http.ResponseWriter, r *http.Request, rawName string) {
 	name, err := normalizeRepoName(rawName)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if _, ok := s.requireRepoRead(w, r, name); !ok {
 		return
 	}
 	items, err := s.store.CIRuns(name)
@@ -771,10 +863,13 @@ func (s *Server) runCI(w http.ResponseWriter, r *http.Request, rawName string) {
 	writeJSON(w, http.StatusOK, updated)
 }
 
-func (s *Server) listPermissions(w http.ResponseWriter, _ *http.Request, rawName string) {
+func (s *Server) listPermissions(w http.ResponseWriter, r *http.Request, rawName string) {
 	name, err := normalizeRepoName(rawName)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if _, ok := s.requireRepoRole(w, r, name, "admin"); !ok {
 		return
 	}
 	items, err := s.store.RepoPermissions(name)
@@ -842,6 +937,9 @@ func (s *Server) repoCommits(w http.ResponseWriter, r *http.Request, rawName str
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if _, ok := s.requireRepoRead(w, r, name); !ok {
+		return
+	}
 	repoPath := s.repoPath(name)
 	if !isDir(repoPath) {
 		writeError(w, http.StatusNotFound, errors.New("repository not found"))
@@ -881,6 +979,9 @@ func (s *Server) repoCommit(w http.ResponseWriter, r *http.Request, rawName, com
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if _, ok := s.requireRepoRead(w, r, name); !ok {
+		return
+	}
 	if !isDir(s.repoPath(name)) {
 		writeError(w, http.StatusNotFound, errors.New("repository not found"))
 		return
@@ -916,13 +1017,15 @@ func (s *Server) repoCommit(w http.ResponseWriter, r *http.Request, rawName, com
 		"body":        strings.TrimSpace(parts[5]),
 		"diff":        strings.TrimSpace(diff),
 	})
-	_ = r
 }
 
-func (s *Server) repoBranches(w http.ResponseWriter, _ *http.Request, rawName string) {
+func (s *Server) repoBranches(w http.ResponseWriter, r *http.Request, rawName string) {
 	name, err := normalizeRepoName(rawName)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if _, ok := s.requireRepoRead(w, r, name); !ok {
 		return
 	}
 	repoPath := s.repoPath(name)
@@ -1030,6 +1133,9 @@ func (s *Server) repoSettings(w http.ResponseWriter, r *http.Request, rawName st
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if _, ok := s.requireRepoRole(w, r, name, "admin"); !ok {
+		return
+	}
 	repo, err := s.repository(r, name)
 	if err != nil {
 		writeError(w, http.StatusNotFound, errors.New("repository not found"))
@@ -1054,6 +1160,7 @@ func (s *Server) updateRepoSettings(w http.ResponseWriter, r *http.Request, rawN
 	}
 	var input struct {
 		Description       *string  `json:"description"`
+		Visibility        *string  `json:"visibility"`
 		ProtectedBranches []string `json:"protectedBranches"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -1082,6 +1189,10 @@ func (s *Server) updateRepoSettings(w http.ResponseWriter, r *http.Request, rawN
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	if _, err := s.store.UpdateRepo(name, input.Description, input.Visibility); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	repo, err := s.repository(r, name)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -1094,6 +1205,9 @@ func (s *Server) repoTree(w http.ResponseWriter, r *http.Request, rawName string
 	name, err := normalizeRepoName(rawName)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if _, ok := s.requireRepoRead(w, r, name); !ok {
 		return
 	}
 	ref := defaultString(r.URL.Query().Get("ref"), "HEAD")
@@ -1139,6 +1253,9 @@ func (s *Server) repoBlob(w http.ResponseWriter, r *http.Request, rawName string
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if _, ok := s.requireRepoRead(w, r, name); !ok {
+		return
+	}
 	ref := defaultString(r.URL.Query().Get("ref"), "HEAD")
 	blobPath := strings.Trim(r.URL.Query().Get("path"), "/")
 	if blobPath == "" {
@@ -1169,6 +1286,15 @@ func (s *Server) gitHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, errors.New("repository not found"))
 		return
 	}
+	writeAccess := isGitWriteRequest(r, pathInfo)
+	w.Header().Set("WWW-Authenticate", `Basic realm="Minihub"`)
+	if writeAccess {
+		if _, ok := s.requireRepoRole(w, r, repoName, "write"); !ok {
+			return
+		}
+	} else if _, ok := s.requireRepoRead(w, r, repoName); !ok {
+		return
+	}
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -1188,6 +1314,9 @@ func (s *Server) gitHTTP(w http.ResponseWriter, r *http.Request) {
 		"CONTENT_LENGTH="+strconv.Itoa(len(body)),
 		"REMOTE_ADDR="+remoteAddr(r),
 	)
+	if user, ok := s.currentUser(r); ok {
+		cmd.Env = append(cmd.Env, "REMOTE_USER="+user.Username)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -1285,55 +1414,61 @@ func (s *Server) frontend(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) repositories(r *http.Request) ([]Repository, error) {
 	var repos []Repository
-	if !isDir(s.repoRoot) {
-		return repos, nil
+	records, err := s.store.VisibleRepos(s.currentUserPtr(r))
+	if err != nil {
+		return nil, err
 	}
-	err := filepath.WalkDir(s.repoRoot, func(p string, d os.DirEntry, err error) error {
+	for _, record := range records {
+		if !isDir(s.repoPath(record.FullName)) {
+			continue
+		}
+		repo, err := s.repositoryFromRecord(r, record)
 		if err != nil {
-			return err
-		}
-		if !d.IsDir() || !strings.HasSuffix(d.Name(), ".git") {
-			return nil
-		}
-		if !isFile(filepath.Join(p, "HEAD")) {
-			return nil
-		}
-		rel, err := filepath.Rel(s.repoRoot, p)
-		if err != nil {
-			return err
-		}
-		name := strings.TrimSuffix(filepath.ToSlash(rel), ".git")
-		repo, err := s.repository(r, name)
-		if err != nil {
-			return err
+			return nil, err
 		}
 		repos = append(repos, repo)
-		return filepath.SkipDir
-	})
-	sort.Slice(repos, func(i, j int) bool {
-		return repos[i].UpdatedAt.After(repos[j].UpdatedAt)
-	})
-	return repos, err
+	}
+	return repos, nil
 }
 
 func (s *Server) repository(r *http.Request, name string) (Repository, error) {
+	record, err := s.store.RepoRecord(name)
+	if err != nil {
+		return Repository{}, err
+	}
+	return s.repositoryFromRecord(r, record)
+}
+
+func (s *Server) repositoryFromRecord(r *http.Request, record RepoRecord) (Repository, error) {
+	name := record.FullName
 	repoPath := s.repoPath(name)
 	info, err := os.Stat(repoPath)
 	if err != nil {
 		return Repository{}, err
 	}
 	meta := readRepoMeta(repoPath)
-	if meta.CreatedAt.IsZero() {
-		meta.CreatedAt = info.ModTime().UTC()
+	createdAt := record.CreatedAt
+	if createdAt == "" {
+		if meta.CreatedAt.IsZero() {
+			createdAt = info.ModTime().UTC().Format(time.RFC3339)
+		} else {
+			createdAt = meta.CreatedAt.Format(time.RFC3339)
+		}
+	}
+	updatedAt := record.UpdatedAt
+	if updatedAt == "" {
+		updatedAt = info.ModTime().UTC().Format(time.RFC3339)
 	}
 	return Repository{
 		Name:              name,
-		Description:       meta.Description,
+		Owner:             record.OwnerName,
+		Description:       record.Description,
+		Visibility:        record.Visibility,
 		DefaultBranch:     s.defaultBranch(name),
 		ProtectedBranches: meta.ProtectedBranches,
 		CloneURL:          absoluteURL(r, "/git/"+name+".git"),
-		CreatedAt:         meta.CreatedAt,
-		UpdatedAt:         info.ModTime().UTC(),
+		CreatedAt:         createdAt,
+		UpdatedAt:         updatedAt,
 	}, nil
 }
 
@@ -1361,6 +1496,17 @@ func normalizeRepoName(raw string) (string, error) {
 	return name, nil
 }
 
+func normalizeRepoShortName(raw string) (string, error) {
+	name, err := normalizeRepoName(raw)
+	if err != nil {
+		return "", err
+	}
+	if strings.Contains(name, "/") {
+		return "", errors.New("repository name should not include an owner")
+	}
+	return name, nil
+}
+
 func normalizeBranchName(raw string) (string, error) {
 	name := strings.TrimSpace(raw)
 	if name == "" {
@@ -1379,6 +1525,13 @@ func repoNameFromGitPath(pathInfo string) (string, error) {
 		return "", errors.New("git URL must include a .git repository path")
 	}
 	return normalizeRepoName(trimmed[:idx])
+}
+
+func isGitWriteRequest(r *http.Request, pathInfo string) bool {
+	if r.Method == http.MethodPost && strings.Contains(pathInfo, "git-receive-pack") {
+		return true
+	}
+	return r.URL.Query().Get("service") == "git-receive-pack"
 }
 
 func splitAction(rest, marker string) (string, string) {

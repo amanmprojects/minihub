@@ -2,7 +2,6 @@ package app
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"errors"
@@ -11,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 )
 
@@ -34,6 +34,20 @@ type Permission struct {
 	CreatedAt string `json:"createdAt"`
 }
 
+type RepoRecord struct {
+	ID            int64
+	OwnerType     string
+	OwnerID       int64
+	OwnerName     string
+	Name          string
+	FullName      string
+	Description   string
+	DefaultBranch string
+	Visibility    string
+	CreatedAt     string
+	UpdatedAt     string
+}
+
 func OpenStore(dataDir, dbPath string) (*Store, error) {
 	if dbPath == "" {
 		dbPath = filepath.Join(dataDir, "minihub.db")
@@ -45,10 +59,6 @@ func OpenStore(dataDir, dbPath string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	if err := s.ensureSystemUser(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -67,33 +77,20 @@ func (s *Store) migrate() error {
 	return err
 }
 
-func (s *Store) ensureSystemUser() error {
-	_, err := s.db.Exec(`INSERT OR IGNORE INTO users (id, username, display_name, email, password_hash) VALUES (1, 'dev', 'Development User', 'dev@minihub.local', '')`)
-	return err
-}
-
-func (s *Store) EnsureRepo(name, description string) error {
-	_, err := s.db.Exec(`INSERT OR IGNORE INTO repo_records (id, owner_type, owner_id, name, description) VALUES ((SELECT COALESCE(MAX(id), 0) + 1 FROM repo_records), 'user', 1, ?, ?)`, name, description)
-	return err
-}
-
-func (s *Store) RepoID(name string) (int64, error) {
-	var id int64
-	err := s.db.QueryRow(`SELECT id FROM repo_records WHERE owner_type = 'user' AND owner_id = 1 AND name = ?`, name).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		if err := s.EnsureRepo(name, ""); err != nil {
-			return 0, err
-		}
-		err = s.db.QueryRow(`SELECT id FROM repo_records WHERE owner_type = 'user' AND owner_id = 1 AND name = ?`, name).Scan(&id)
-	}
-	return id, err
-}
-
 func (s *Store) CreateUser(username, displayName, email, password string) (User, error) {
-	if username == "" || email == "" {
-		return User{}, errors.New("username and email are required")
+	username = strings.TrimSpace(strings.ToLower(username))
+	displayName = strings.TrimSpace(displayName)
+	email = strings.TrimSpace(strings.ToLower(email))
+	if username == "" || email == "" || password == "" {
+		return User{}, errors.New("username, email, and password are required")
 	}
-	hash := hashPassword(password)
+	if !usernamePattern.MatchString(username) {
+		return User{}, errors.New("username may only contain letters, numbers, dots, underscores, and hyphens")
+	}
+	hash, err := hashPassword(password)
+	if err != nil {
+		return User{}, err
+	}
 	res, err := s.db.Exec(`INSERT INTO users (username, display_name, email, password_hash) VALUES (?, ?, ?, ?)`, username, displayName, email, hash)
 	if err != nil {
 		return User{}, err
@@ -125,13 +122,13 @@ func (s *Store) User(id int64) (User, error) {
 	return user, err
 }
 
-func (s *Store) Login(username, password string) (map[string]any, error) {
+func (s *Store) Login(email, password string) (map[string]any, error) {
 	var id int64
 	var hash string
-	if err := s.db.QueryRow(`SELECT id, password_hash FROM users WHERE username = ?`, username).Scan(&id, &hash); err != nil {
+	if err := s.db.QueryRow(`SELECT id, password_hash FROM users WHERE email = ?`, strings.TrimSpace(strings.ToLower(email))).Scan(&id, &hash); err != nil {
 		return nil, err
 	}
-	if hash != hashPassword(password) {
+	if !checkPassword(hash, password) {
 		return nil, errors.New("invalid credentials")
 	}
 	token := randomToken()
@@ -149,10 +146,11 @@ func (s *Store) Login(username, password string) (map[string]any, error) {
 func (s *Store) CheckPassword(username, password string) (User, bool) {
 	var id int64
 	var hash string
-	if err := s.db.QueryRow(`SELECT id, password_hash FROM users WHERE username = ?`, username).Scan(&id, &hash); err != nil {
+	identity := strings.TrimSpace(strings.ToLower(username))
+	if err := s.db.QueryRow(`SELECT id, password_hash FROM users WHERE username = ? OR email = ?`, identity, identity).Scan(&id, &hash); err != nil {
 		return User{}, false
 	}
-	if hash != hashPassword(password) {
+	if !checkPassword(hash, password) {
 		return User{}, false
 	}
 	user, err := s.User(id)
@@ -168,6 +166,119 @@ JOIN users ON users.id = sessions.user_id
 WHERE sessions.token = ? AND sessions.expires_at > datetime('now')
 `, token).Scan(&user.ID, &user.Username, &user.DisplayName, &user.Email, &user.CreatedAt)
 	return user, err
+}
+
+func (s *Store) CreateRepo(owner User, name, description, visibility string) (RepoRecord, error) {
+	if owner.ID == 0 {
+		return RepoRecord{}, errors.New("repository owner is required")
+	}
+	if visibility == "" {
+		visibility = "private"
+	}
+	if !validVisibility(visibility) {
+		return RepoRecord{}, errors.New("invalid visibility")
+	}
+	res, err := s.db.Exec(`INSERT INTO repo_records (owner_type, owner_id, name, description, visibility) VALUES ('user', ?, ?, ?, ?)`, owner.ID, name, description, visibility)
+	if err != nil {
+		return RepoRecord{}, err
+	}
+	id, _ := res.LastInsertId()
+	if _, err := s.db.Exec(`INSERT INTO repo_permissions (repo_id, user_id, role) VALUES (?, ?, 'admin')`, id, owner.ID); err != nil {
+		return RepoRecord{}, err
+	}
+	return s.RepoByID(id)
+}
+
+func (s *Store) RepoByID(id int64) (RepoRecord, error) {
+	return s.repoRecord(`WHERE repo_records.id = ?`, id)
+}
+
+func (s *Store) RepoRecord(fullName string) (RepoRecord, error) {
+	owner, repo, ok := strings.Cut(fullName, "/")
+	if !ok || owner == "" || repo == "" || strings.Contains(repo, "/") {
+		return RepoRecord{}, sql.ErrNoRows
+	}
+	return s.repoRecord(`WHERE repo_records.owner_type = 'user' AND users.username = ? AND repo_records.name = ?`, owner, repo)
+}
+
+func (s *Store) RepoID(name string) (int64, error) {
+	record, err := s.RepoRecord(name)
+	return record.ID, err
+}
+
+func (s *Store) VisibleRepos(user *User) ([]RepoRecord, error) {
+	query := `
+SELECT DISTINCT repo_records.id, repo_records.owner_type, repo_records.owner_id, users.username, repo_records.name, repo_records.description, repo_records.default_branch, repo_records.visibility, repo_records.created_at, repo_records.updated_at
+FROM repo_records
+JOIN users ON users.id = repo_records.owner_id AND repo_records.owner_type = 'user'
+LEFT JOIN repo_permissions ON repo_permissions.repo_id = repo_records.id
+WHERE repo_records.visibility = 'public'`
+	args := []any{}
+	if user != nil {
+		query += ` OR repo_records.owner_id = ? OR repo_permissions.user_id = ?`
+		args = append(args, user.ID, user.ID)
+	}
+	query += ` ORDER BY repo_records.updated_at DESC`
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRepoRecords(rows)
+}
+
+func (s *Store) UpdateRepo(name string, description *string, visibility *string) (RepoRecord, error) {
+	record, err := s.RepoRecord(name)
+	if err != nil {
+		return RepoRecord{}, err
+	}
+	if description != nil {
+		record.Description = strings.TrimSpace(*description)
+	}
+	if visibility != nil {
+		record.Visibility = strings.TrimSpace(*visibility)
+		if !validVisibility(record.Visibility) {
+			return RepoRecord{}, errors.New("invalid visibility")
+		}
+	}
+	_, err = s.db.Exec(`UPDATE repo_records SET description = ?, visibility = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, record.Description, record.Visibility, record.ID)
+	if err != nil {
+		return RepoRecord{}, err
+	}
+	return s.RepoByID(record.ID)
+}
+
+func (s *Store) repoRecord(where string, args ...any) (RepoRecord, error) {
+	rows, err := s.db.Query(`
+SELECT repo_records.id, repo_records.owner_type, repo_records.owner_id, users.username, repo_records.name, repo_records.description, repo_records.default_branch, repo_records.visibility, repo_records.created_at, repo_records.updated_at
+FROM repo_records
+JOIN users ON users.id = repo_records.owner_id AND repo_records.owner_type = 'user'
+`+where, args...)
+	if err != nil {
+		return RepoRecord{}, err
+	}
+	defer rows.Close()
+	records, err := scanRepoRecords(rows)
+	if err != nil {
+		return RepoRecord{}, err
+	}
+	if len(records) == 0 {
+		return RepoRecord{}, sql.ErrNoRows
+	}
+	return records[0], nil
+}
+
+func scanRepoRecords(rows *sql.Rows) ([]RepoRecord, error) {
+	var records []RepoRecord
+	for rows.Next() {
+		var r RepoRecord
+		if err := rows.Scan(&r.ID, &r.OwnerType, &r.OwnerID, &r.OwnerName, &r.Name, &r.Description, &r.DefaultBranch, &r.Visibility, &r.CreatedAt, &r.UpdatedAt); err != nil {
+			return nil, err
+		}
+		r.FullName = r.OwnerName + "/" + r.Name
+		records = append(records, r)
+	}
+	return records, rows.Err()
 }
 
 func (s *Store) CreateOrg(name, displayName string) (map[string]any, error) {
@@ -229,9 +340,6 @@ ORDER BY users.username
 }
 
 func (s *Store) UserRepoRole(repoName string, userID int64) (string, error) {
-	if userID == 1 {
-		return "admin", nil
-	}
 	repoID, err := s.RepoID(repoName)
 	if err != nil {
 		return "", err
@@ -557,9 +665,17 @@ func validRole(role string) bool {
 	}
 }
 
-func hashPassword(password string) string {
-	sum := sha256.Sum256([]byte(password))
-	return hex.EncodeToString(sum[:])
+func validVisibility(visibility string) bool {
+	return visibility == "private" || visibility == "public"
+}
+
+func hashPassword(password string) (string, error) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	return string(hash), err
+}
+
+func checkPassword(hash, password string) bool {
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
 }
 
 func randomToken() string {
@@ -572,6 +688,22 @@ func randomToken() string {
 
 const sqliteSchema = `
 PRAGMA foreign_keys = ON;
+
+DROP TABLE IF EXISTS ci_runs;
+DROP TABLE IF EXISTS webhook_deliveries;
+DROP TABLE IF EXISTS webhooks;
+DROP TABLE IF EXISTS releases;
+DROP TABLE IF EXISTS issues;
+DROP TABLE IF EXISTS comments;
+DROP TABLE IF EXISTS pr_reviews;
+DROP TABLE IF EXISTS pull_requests;
+DROP TABLE IF EXISTS protected_branches;
+DROP TABLE IF EXISTS repo_permissions;
+DROP TABLE IF EXISTS repo_records;
+DROP TABLE IF EXISTS org_members;
+DROP TABLE IF EXISTS orgs;
+DROP TABLE IF EXISTS sessions;
+DROP TABLE IF EXISTS users;
 
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY,
@@ -611,7 +743,7 @@ CREATE TABLE IF NOT EXISTS repo_records (
   name TEXT NOT NULL,
   description TEXT NOT NULL DEFAULT '',
   default_branch TEXT NOT NULL DEFAULT 'main',
-  visibility TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('private', 'internal', 'public')),
+  visibility TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('private', 'public')),
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE (owner_type, owner_id, name)
