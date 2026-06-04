@@ -1,0 +1,22 @@
+services:
+  minihub:
+    build:
+      context: .
+    image: minihub:latest
+    container_name: minihub
+    restart: unless-stopped
+    environment:
+      MINIHUB_ADDR: ":8080"
+      MINIHUB_DATA: /data
+      MINIHUB_DB: /data/minihub.db
+      MINIHUB_FRONTEND: /app/frontend
+      MINIHUB_SSH_ADDR: ":2222"
+      MINIHUB_SSH_HOST_KEY: /data/ssh_host_key
+    ports:
+      - "8080:8080"
+      - "2222:2222"
+    volumes:
+      - minihub-data:/data
+
+volumes:
+  minihub-data:
